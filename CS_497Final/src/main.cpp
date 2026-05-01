@@ -33,15 +33,6 @@ enum MessageType {
   MSG_ERROR = 4,
 };
 
-enum SystemMain{
-  SYS_SENSOR_POLLING = 0,
-  SYS_BLE = 1,
-  SYS_WIFI = 2,
-  SYS_ALERT = 3,
-  SYS_LOGGING = 4, 
-  SYS_ERROR = 5,
-};
-
 struct Data {
   MessageType MSG_TYPE; // Buffer to hold the message to be displayed on LCD
   uint16_t CO2; // Variable to hold CO2 value from CCS811 sensor
