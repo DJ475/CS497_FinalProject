@@ -33,6 +33,15 @@ enum MessageType {
   MSG_ERROR = 4,
 };
 
+enum SystemMain{
+  SYS_SENSOR_POLLING = 0,
+  SYS_BLE = 1,
+  SYS_WIFI = 2,
+  SYS_ALERT = 3,
+  SYS_LOGGING = 4, 
+  SYS_ERROR = 5,
+};
+
 struct Data {
   MessageType MSG_TYPE; // Buffer to hold the message to be displayed on LCD
   uint16_t CO2; // Variable to hold CO2 value from CCS811 sensor
@@ -40,6 +49,7 @@ struct Data {
   float tempF; // Variable to hold temperature value from BME280 sensor
   float pressure; // Variable to hold pressure value from BME280 sensor
   float humidity; // Variable to hold humidity value from BME280 sensor
+  float dust; // Variable to hold dust particle values from GP2Y1010AU0F sensor
 };
 
 
@@ -50,25 +60,12 @@ QueueHandle_t ControllerQueue = xQueueCreate(5, sizeof(Data)); // This queue wil
 QueueHandle_t DisplayQueue = xQueueCreate(5, sizeof(Data)); // This queue is for data being sent to the LCD Task
 QueueHandle_t BLEQueue = xQueueCreate(5, sizeof(Data)); // This queue is for data being sent to the BLE Task
 
-
-// Task to write output to LCD screen.
-void TaskLCD (void *pvParameters) 
+void TaskBuzzer(void *pvParameters)
 {
-  Data recievedData; // Create a data structure to hold the message to be displayed on LCD
-  while (true) {
-    if(xQueueReceive(DisplayQueue, &recievedData, portMAX_DELAY)) { // Wait for data to be received from the queue
-      LCD.clear(); // Clear image on screen
-      LCD.setCursor(0, 0); // Set lcd index to first cursor row
-      switch (recievedData.MSG_TYPE)
-      {
-        case MSG_LCD:
-          LCD.print("Data-LCD:"); // Print message values on LCD Screen
-          break;
-        case MSG_BLE:
-          Serial.print("Data-BLE"); // Print message values to BLE
-      } 
-    }
-    vTaskDelay(1000 / portTICK_PERIOD_MS); // Delay by 1000ms
+  while(true)
+  {
+    // Add Alarm/Buzzer Calls Here When Dust/Env is in dangerous levels
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
   }
 }
 
@@ -101,6 +98,15 @@ void TaskEnv (void *pvParameters)
   }
 }
 
+void TaskDust(void *pvParameters)
+{
+  while(true)
+  { 
+    // Collect Dust Sensor Readings Here
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
+}
+
 void TaskController (void *pvParameters) 
 {
   while (true) {
@@ -108,9 +114,39 @@ void TaskController (void *pvParameters)
     // wait to receive data from different sensors in Controller Task
     if(xQueueReceive(ControllerQueue, &recievedData, portMAX_DELAY)) {
       // After received sensor data change states based on data
-
+      
       /// Then send to appropriate Queue for Viewing and Displaying the data(TaskLCD and TaskBLE)
     }    
+  }
+}
+
+// Task to write output to LCD screen.
+void TaskLCD (void *pvParameters) 
+{
+  Data recievedData; // Create a data structure to hold the message to be displayed on LCD
+  while (true) {
+    if(xQueueReceive(DisplayQueue, &recievedData, portMAX_DELAY)) { // Wait for data to be received from the queue
+      LCD.clear(); // Clear image on screen
+      LCD.setCursor(0, 0); // Set lcd index to first cursor row
+      switch (recievedData.MSG_TYPE)
+      {
+        case MSG_LCD:
+          LCD.print("Data-LCD:"); // Print message values on LCD Screen
+          break;
+        case MSG_BLE:
+          Serial.print("Data-BLE"); // Print message values to BLE
+      } 
+    }
+    vTaskDelay(1000 / portTICK_PERIOD_MS); // Delay by 1000ms
+  }
+}
+
+void TaskBLE(void *pvParameters)
+{
+  while(true)
+  {
+    // add ble notification/communication here
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
   }
 }
 
@@ -151,17 +187,8 @@ void setup() {
 
   /*  ################################################ FREERTOS TASK CREATION ######################################################### */
   xTaskCreate(
-    TaskController,
-    "Controller Task",
-    2048,
-    NULL,
-    1,
-    NULL
-  );
-  
-  xTaskCreate(
-    TaskLCD,
-    "LCD Task",
+    TaskBuzzer,
+    "Buzzer Task",
     2048,
     NULL,
     1,
@@ -176,6 +203,43 @@ void setup() {
     1,
     NULL
   );
+  
+  xTaskCreate(
+    TaskDust,
+    "Dust Sensor Task",
+    2048,
+    NULL,
+    1,
+    NULL
+  );
+
+  xTaskCreate(
+    TaskController,
+    "Controller Task",
+    2048,
+    NULL,
+    1,
+    NULL
+  );
+  
+  
+  xTaskCreate(
+    TaskLCD,
+    "LCD Task",
+    2048,
+    NULL,
+    1,
+    NULL
+  );
+
+  xTaskCreate(
+    TaskBLE,
+    "BLE Task",
+    2048,
+    NULL,
+    1,
+    NULL
+  );  
 }
 
 void loop() {}
