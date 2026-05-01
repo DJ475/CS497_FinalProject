@@ -191,7 +191,7 @@ void setup() {
     "Buzzer Task",
     2048,
     NULL,
-    1,
+    2,
     NULL
   );
 
@@ -200,7 +200,7 @@ void setup() {
     "Environment Sensor Task",
     2048,
     NULL,
-    1,
+    3,
     NULL
   );
   
@@ -209,7 +209,7 @@ void setup() {
     "Dust Sensor Task",
     2048,
     NULL,
-    1,
+    3,
     NULL
   );
 
@@ -218,7 +218,7 @@ void setup() {
     "Controller Task",
     2048,
     NULL,
-    1,
+    3,
     NULL
   );
   
@@ -235,11 +235,21 @@ void setup() {
   xTaskCreate(
     TaskBLE,
     "BLE Task",
-    2048,
+    4096,
     NULL,
-    1,
+    2,
     NULL
   );  
+
+  // // Add Last
+  // xTaskCreate(
+  //   TaskWIFI,
+  //   "WIFI Task",
+  //   4096,
+  //   NULL,
+  //   1,
+  //   NULL
+  // ); 
 }
 
 void loop() {}
