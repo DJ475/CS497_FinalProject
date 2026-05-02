@@ -23,6 +23,10 @@ CCS811 CCS811OBJ(CCS811_ADDR);
 // CCS811 Burn-in Time: Please be aware that the CCS811 datasheet recommends a burn-in of 48 hours and a run-in of 20 minutes
 //  (i.e. you must allow 20 minutes for the sensor to warm up and output valid data).
 
+////////////////////////////////////////////////////////// DEFINE PINS /////////////////////////////////////////////////////////
+#define ButtonPin 0 // Built-In ESP32 Button Pin: D0
+
+
 BME280 BME280OBJ;
 
 enum MessageType {
@@ -50,6 +54,10 @@ struct Data {
 QueueHandle_t ControllerQueue = xQueueCreate(5, sizeof(Data)); // This queue will use to send from sensors to send data to the Controller Task
 QueueHandle_t DisplayQueue = xQueueCreate(5, sizeof(Data)); // This queue is for data being sent to the LCD Task
 QueueHandle_t BLEQueue = xQueueCreate(5, sizeof(Data)); // This queue is for data being sent to the BLE Task
+
+
+//// This is the signal/flag telling other tasks whether WIFI/BLE is ON(True) OR OFF(False)
+bool WirelessToggleState = false; 
 
 void TaskBuzzer(void *pvParameters)
 {
@@ -141,17 +149,45 @@ void TaskBLE(void *pvParameters)
   }
 }
 
+void TaskWireless(void *pvParameters)
+{
+  while(true)
+  {
+    int buttonState = digitalRead(ButtonPin);
+    // If button pressed than toggle semaphore flag/signal to turn on wifi
+    if(buttonState == LOW) 
+    {
+      // toggle logic here
+      if(WirelessToggleState == true)
+      {
+        WirelessToggleState = false;
+        Serial.println("WIFI/BLE OFF");
+      }
+      else
+      {
+        Serial.println("WIFI/BLE ON");
+        WirelessToggleState = true;
+      }
+      vTaskDelay(300 / portTICK_PERIOD_MS); // Debounce Button Pressing
+    }
+    vTaskDelay(200 / portTICK_PERIOD_MS); // Poll every 100 ms in order to not miss a button press event
+  }
+}
+
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(115200); // Serial Communication Intialization
   Wire.begin(); // I2C Communication Intialization
+
+  pinMode(ButtonPin, INPUT_PULLUP); 
 
   /* ##################################################### COMPONENT SETUP ############################################################# */
   // LCD SETUP
   LCD.begin(16, 2); // LCD Column and Row Initialization
   LCD.clear(); // Clear image on screen
   LCD.print("System Started.."); // Print System Started on LCD
-  delay(2000); // Delay by 2000ms to show the message on LCD
+  delay(2500); // Delay by 2000ms to show the message on LCD
+  LCD.clear(); // Clear the Start Message
 
   // ENVIRONMENTAL SENSOR SETUP
   BME280OBJ.settings.commInterface = I2C_MODE;
@@ -166,15 +202,21 @@ void setup() {
 
   if(BME280OBJ.begin() != 0x60)
   {
-    Serial.print("INIT ERR BME280");
+    LCD.print("INIT ERR BME280");
+  }
+  else
+  {
+    LCD.print("BME280:Started");
   }
 
   
-  // CCS811 SETUP
-  if(CCS811OBJ.begin() != 0)
-  {
-    Serial.print("INIT ERR CCS811");
-  }
+  //// CCS811 SETUP
+  CCS811OBJ.begin();
+  delay(2500); // Give CCS811 Time to Startup/Boot
+  LCD.clear(); // Clear message after Initialization succeeds
+  LCD.print("CCS811:Started");
+  delay(2500);
+  LCD.clear(); // Clear Initalize Messages
 
   /*  ################################################ FREERTOS TASK CREATION ######################################################### */
   xTaskCreate(
@@ -231,6 +273,16 @@ void setup() {
     2,
     NULL
   );  
+  
+  // This task enables and disables wireless protocols/polling for WIFI and BLE
+  xTaskCreate(
+    TaskWireless,
+    "WIRELESS TOGGLE Task",
+    2048,
+    NULL,
+    2,
+    NULL
+  ); 
 
   // // Add Last
   // xTaskCreate(
