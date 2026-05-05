@@ -3,6 +3,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
+#include <freertos/semphr.h>
 
 #include <Wire.h>
 #include <SparkFunBME280.h>
@@ -13,6 +14,9 @@
 #include <BLEUtils.h>
 #include <BLEServer.h>
 #include <BLE2902.h>
+#include <LittleFS.h>
+#include "FS.h"
+
 
 // Source: https://www.circuitschools.com/interfacing-16x2-lcd-module-with-esp32-with-and-without-i2c/?utm_source=copilot.com
 // This source was used to access functions to write to the LCD screen as well as the pinouts needed to turn the lcd screen on
@@ -74,6 +78,14 @@ class ServerCallbacks: public BLEServerCallbacks {
   }
 };
 
+// LittleFS Variables
+// Little FS Format If Failed Flag
+#define FORMAT_LITTLEFS_IF_FAILED true
+
+// Source: https://esp32tutorials.com/esp32-freertos-mutex-esp-idf/
+// Used to prevent race condition between TaskController and TaskStorage during writting
+xSemaphoreHandle DataWriteMutex; // Mutex used for file writing(Shared by TaskController and TaskStorage)
+
 
 /////////////////////////////////////////// Enum Message Flags /////////////////////////////////////////////////////////////////////////////////////
 enum MessageType {
@@ -95,6 +107,7 @@ struct Data {
   float dust; // Variable to hold dust particle values from GP2Y1010AU0F sensor
 };
 
+Data newestDataWrite; // this variable is used by the File System to encasulate the current reading values from TaskController
 
 // Source: https://controllerstech.com/freertos-queues-arduino-task-communication/
 // FreeRTOS syntax for intertask communication
@@ -115,8 +128,6 @@ void makeBuzzerBeep(int freq, int duration) {
 }
 void turnBuzzerOn(int freq) { tone(BUZZER_PIN, freq); }
 void turnBuzzerOff()        { noTone(BUZZER_PIN); }
-
-
 
 void TaskEnv (void *pvParameters) 
 {
@@ -207,6 +218,13 @@ void TaskController (void *pvParameters)
 
       // Route values to BLE and LCD
       recievedData.MSG_TYPE = MSG_LCD;
+
+      // Use Semaphore to access shared resource with TaskStorage
+      if(xSemaphoreTake(DataWriteMutex, portMAX_DELAY))
+      {
+        newestDataWrite = recievedData; // copy struct contents into global readings variable
+        xSemaphoreGive(DataWriteMutex);
+      }
       xQueueSend(DisplayQueue, &recievedData, portMAX_DELAY);
       /// Then send to appropriate Queue for Viewing and Displaying the data(TaskLCD and TaskBLE)
     }    
@@ -312,6 +330,85 @@ void TaskWireless(void *pvParameters)
   }
 }
 
+////////////////////////////////////// Helper Functions For LittleFS File Operations /////////////////////////////////////////////
+// Source: https://randomnerdtutorials.com/esp32-write-data-littlefs-arduino/#esp32-little-fs-handle-files
+// We used this source for syntax in using LittleFS for longterm storage of environmental data
+
+// Create Data Directory if not Exists 
+void createDir(fs::FS &fs, const char * path){
+    Serial.printf("Creating Dir: %s\n", path);
+    if(fs.mkdir(path)){
+        Serial.println("Directory Created");
+    } else {
+        Serial.println("Directory Creation Failed");
+    }
+}
+
+// Write message to file
+void writeFile(fs::FS &fs, const char * path, const char * message){
+    Serial.printf("Writing file: %s\r\n", path);
+
+    File file = fs.open(path, FILE_WRITE);
+    if(!file){
+        Serial.println("- failed to open file for writing");
+        return;
+    }
+    if(file.print(message)){
+        Serial.println("- file written");
+    } else {
+        Serial.println("- write failed");
+    }
+    file.close();
+}
+
+// Append to existing log file
+void appendLog(Data &capture) {
+  File logFile = LittleFS.open("/env.csv", FILE_APPEND);
+  if(logFile) {
+    logFile.print(esp_timer_get_time() / 1000000ULL); logFile.print(",");
+    logFile.print(capture.CO2);                      logFile.print(",");
+    logFile.print(capture.TVOC);                     logFile.print(",");
+    logFile.print(capture.tempF);                    logFile.print(",");
+    logFile.print(capture.humidity);                 logFile.print(",");
+    logFile.print(capture.pressure);                 logFile.print(",");
+    logFile.println(capture.dust); // println adds \n
+    logFile.close();
+    Serial.println("Log entry written to LittleFS");
+  } else {
+    Serial.println("Failed to open log file");
+  }
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void TaskStorage(void *pvParameters)
+{
+  uint64_t logTimerInterval = 60ULL * 60ULL * 1000000ULL; // this caluclates into waiting about 1 hour
+  uint64_t lastTimeLogged = esp_timer_get_time(); // get current time storing last time logged
+  while(true)
+  {
+    Data captureReadings;
+
+    // Source: https://forum.arduino.cc/t/esp32-freertos-scheduling-task-with-delays-in-days/1092813/6
+    // Using this source we were able to schedule the task to run every hour writing to the csv stored in the file system in a less power consuming way
+
+    // check if time has exceeded the hour timer
+    if((esp_timer_get_time() - lastTimeLogged) >= logTimerInterval)
+    { 
+      // check if reasource is available before write operation
+      if(xSemaphoreTake(DataWriteMutex, portMAX_DELAY))
+      {
+        captureReadings = newestDataWrite; // copy values from current times sensor readings into local captureReadings variable
+        xSemaphoreGive(DataWriteMutex); // give back mutex
+      }
+      
+      appendLog(captureReadings); // write captured data to file system
+      lastTimeLogged = esp_timer_get_time(); // update last time logged after log operation
+    }
+    vTaskDelay(10000 / portTICK_PERIOD_MS); // check timerinterval every 10 seconds
+  }
+}
+
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(115200); // Serial Communication Intialization
@@ -321,6 +418,7 @@ void setup() {
   pinMode(BUZZER_PIN, OUTPUT); // setup buzzer as output
   pinMode(DUST_LED_PIN, OUTPUT); // setup for dust led pin
 
+  DataWriteMutex = xSemaphoreCreateMutex();
 
   /* ################################################### BLE SETUP ##################################################################### */ 
   BLEDevice::init(DEVICE_NAME);
@@ -395,6 +493,31 @@ void setup() {
   //// Dust Sensor Setup
   digitalWrite(DUST_LED_PIN, HIGH); // Turn off led light that detects particles initially
 
+
+  //////////////////////////////////////////////////// LITTLEFS SETUP ////////////////////////////////////////////////////////////
+
+  // Check if LITTLEFS Can Be Mounted
+
+  // If error mounting littlefs show error message then return
+  if(!LittleFS.begin(FORMAT_LITTLEFS_IF_FAILED)){
+      Serial.println("LittleFS Mount Failed");
+      return;
+  }
+  
+  if(!LittleFS.exists("/env.csv")) 
+  {
+    File logFile = LittleFS.open("/env.csv", FILE_WRITE);
+    if(logFile) 
+    {
+      logFile.println("co2,tvoc,temp_f,humidity,pressure,dust");
+      logFile.close();
+    }
+    else
+    {
+      Serial.print("Cannot Create Log File");
+    }
+  }
+
   /*  ################################################ FREERTOS TASK CREATION ######################################################### */
   xTaskCreate(
     TaskEnv,
@@ -450,6 +573,15 @@ void setup() {
     2,
     NULL
   ); 
+
+  xTaskCreate(
+    TaskStorage,
+    "Storage Task",
+    4096,
+    NULL,
+    2,
+    NULL
+  );
 
   // // Add Last
   // xTaskCreate(
