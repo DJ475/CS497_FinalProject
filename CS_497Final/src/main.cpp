@@ -82,6 +82,8 @@ class ServerCallbacks: public BLEServerCallbacks {
 // Little FS Format If Failed Flag
 #define FORMAT_LITTLEFS_IF_FAILED true
 
+int alertCounterDebounce = 0; // this is used to make sure the alert is not triggered during pulses in signals like bushing the GPIO0 push button
+
 // Source: https://esp32tutorials.com/esp32-freertos-mutex-esp-idf/
 // Used to prevent race condition between TaskController and TaskStorage during writting
 xSemaphoreHandle DataWriteMutex; // Mutex used for file writing(Shared by TaskController and TaskStorage)
@@ -202,11 +204,16 @@ void TaskController (void *pvParameters)
       // Check thresholds and use buzzer based on if above thresholds
       if(recievedData.CO2 > 1500 || recievedData.TVOC > 75) 
       {
-        turnBuzzerOn(2000);  // direct function call
+        alertCounterDebounce++; // add 1 to this value, when it hits three than a actual dangerous level is detected and the alarm can make sound
+        if(alertCounterDebounce >= 3) // this means no more false alarms when the button to turn BLE and WIFI on is pressed
+        {
+          turnBuzzerOn(2000);  // direct function call to make buzzer make sound
+        }
       } 
       else
       {
         turnBuzzerOff();
+        alertCounterDebounce = 0; // reset counter debounce value
       }
 
       // if wifi/ble button is toggled on than send data to BLE Task
