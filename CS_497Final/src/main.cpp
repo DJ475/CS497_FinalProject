@@ -8,6 +8,12 @@
 #include <SparkFunBME280.h>
 #include <SparkFunCCS811.h>
 
+#include <WebServer.h>
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
+#include <BLE2902.h>
+
 // Source: https://www.circuitschools.com/interfacing-16x2-lcd-module-with-esp32-with-and-without-i2c/?utm_source=copilot.com
 // This source was used to access functions to write to the LCD screen as well as the pinouts needed to turn the lcd screen on
 LiquidCrystal LCD(19, 23, 18, 5, 15, 4);
@@ -18,23 +24,58 @@ LiquidCrystal LCD(19, 23, 18, 5, 15, 4);
 #define CCS811_ADDR 0x5B // Default I2C Address
 #define BME280_ADDR 0x77 // Default I2C Address
 
-CCS811 CCS811OBJ(CCS811_ADDR);
+////////////////////////////////////////////////// Sensor Object Setup
 // Datasheet Find:
 // CCS811 Burn-in Time: Please be aware that the CCS811 datasheet recommends a burn-in of 48 hours and a run-in of 20 minutes
 //  (i.e. you must allow 20 minutes for the sensor to warm up and output valid data).
+CCS811 CCS811OBJ(CCS811_ADDR);
+BME280 BME280OBJ;
 
 ////////////////////////////////////////////////////////// DEFINE PINS /////////////////////////////////////////////////////////
 #define ButtonPin 0 // Built-In ESP32 Button Pin: D0
 #define BUZZER_PIN 32  // Pin for buzzer
+#define DUST_LED_PIN  33 // Pin for ILED Pin
+#define DUST_AOUT_PIN 34 // Pin for Analog Out Pin
 
+
+//////////////////////////////////////////////// Wireless Connection Variables /////////////////////////////////////////////////
 //// Wifi Credentials to Connect to Hotspot Webserver
 const char* wifiNetworkName = "SSID";
 const char* wifiPassword = "PASSWORD";
 const char* computerAddress = "http://MY_PC_IP:5000/data"; 
 
+// Webserver Object Initialization, Communication Through Port 80
+WebServer webServer(80);
 
-BME280 BME280OBJ;
+//Bluetooth definitions
+#define SERVICE_UUID        "181A"  // Environmental Sensing Service
+#define CHARACTERISTIC_UUID "2A6E"  // Temperature
+#define CO2_CHAR_UUID       "2A6D"  // CO2 Level
+#define HUMIDITY_CHAR_UUID  "2A6F"  // Humidity
+#define TVOC_CHAR_UUID      "12345678-1234-1234-1234-123456789ABC"  // TVOC (custom)
 
+// Bluetooth Advertising Name
+#define DEVICE_NAME "AirQualityMonitor"
+
+//BLE Characteristics
+BLECharacteristic* pTempChar = NULL;
+BLECharacteristic* pCO2Char = NULL;
+BLECharacteristic* pHumidChar = NULL;
+BLECharacteristic* pTVOCChar = NULL;
+bool bleConnected = false;
+
+class ServerCallbacks: public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) {
+    bleConnected = true;
+  }
+  void onDisconnect(BLEServer* pServer) {
+    bleConnected = false;
+    pServer->startAdvertising();
+  }
+};
+
+
+/////////////////////////////////////////// Enum Message Flags /////////////////////////////////////////////////////////////////////////////////////
 enum MessageType {
   MSG_LCD = 0,
   MSG_BLE = 1,
@@ -43,6 +84,7 @@ enum MessageType {
   MSG_ERROR = 4,
 };
 
+/////////////////////////////////////////////// Data Struct ///////////////////////////////////////////////////////////////////////////////////////
 struct Data {
   MessageType MSG_TYPE; // Buffer to hold the message to be displayed on LCD
   uint16_t CO2; // Variable to hold CO2 value from CCS811 sensor
@@ -107,13 +149,34 @@ void TaskEnv (void *pvParameters)
   }
 }
 
-// Source: https://www.waveshare.com/wiki/Dust_Sensor
+// Helper Class for Dust Sensor
+float ReadDustSensor() {
+  digitalWrite(DUST_LED_PIN, LOW);
+  delayMicroseconds(280);
+  int rawValue = analogRead(DUST_AOUT_PIN);
+  delayMicroseconds(40);
+  digitalWrite(DUST_LED_PIN, HIGH);
+
+  float voltage = rawValue * (3.3 / 4095.0);
+  float dustDensity = (voltage - 1.30) * 170.0;
+  return max(dustDensity, 0.0f);
+}
+
+// Source: https://www.makerguides.com/dust-sensor-gp2y1010au0f-with-arduino/#Code_for_measuring_dust_density_with_GP2Y1010AU0F
 // This source gave us the pinout and code smaples needed to read from the dust/particle sensor
 void TaskDust(void *pvParameters)
 {
+  Data sendData;
   while(true)
   { 
     // Collect Dust Sensor Readings Here
+    float dustDensity = ReadDustSensor();
+
+    // set queue values
+    sendData.dust = dustDensity;
+    sendData.MSG_TYPE = MSG_ENV;
+    xQueueSend(ControllerQueue, &sendData, portMAX_DELAY);
+
     vTaskDelay(1000 / portTICK_PERIOD_MS);
   }
 }
@@ -126,7 +189,7 @@ void TaskController (void *pvParameters)
     if(xQueueReceive(ControllerQueue, &recievedData, portMAX_DELAY)) {
       
       // Check thresholds and use buzzer based on if above thresholds
-      if(recievedData.CO2 > 1000 || recievedData.TVOC > 500) 
+      if(recievedData.CO2 > 1500 || recievedData.TVOC > 75) 
       {
         turnBuzzerOn(2000);  // direct function call
       } 
@@ -185,7 +248,41 @@ void TaskBLE(void *pvParameters)
 {
   while(true)
   {
-    // add ble notification/communication here
+    // if bluetooth and  wireless toggle are enabled than start bluetooth advertising 
+    if(bleConnected == true && WirelessToggleState == true)
+    {
+      Data recievedData;
+      if(xQueueReceive(BLEQueue, &recievedData, pdMS_TO_TICKS(100)))
+      {
+        float tempF = recievedData.tempF;
+        int co2 = recievedData.CO2;
+        float humidity = recievedData.humidity;
+        int tvoc = recievedData.TVOC;
+  
+        char dataStr[50];
+        char tempStr[10];
+        char humidStr[10];
+  
+        dtostrf(tempF, 4, 1, tempStr);
+        dtostrf(humidity, 4, 1, humidStr);
+  
+        sprintf(dataStr, "CO2:%d TVOC:%d %sF %s%%", co2, tvoc, tempStr, humidStr);
+  
+        // Send the same formatted string to all characteristics
+        pTempChar->setValue(dataStr);
+        pTempChar->notify();
+  
+        pCO2Char->setValue(dataStr);
+        pCO2Char->notify();
+  
+        pHumidChar->setValue(dataStr);
+        pHumidChar->notify();
+  
+        pTVOCChar->setValue(dataStr);
+        pTVOCChar->notify();
+      }
+
+    }
     vTaskDelay(1000 / portTICK_PERIOD_MS);
   }
 }
@@ -222,6 +319,42 @@ void setup() {
 
   pinMode(ButtonPin, INPUT_PULLUP); // setup button pin as input
   pinMode(BUZZER_PIN, OUTPUT); // setup buzzer as output
+  pinMode(DUST_LED_PIN, OUTPUT); // setup for dust led pin
+
+
+  /* ################################################### BLE SETUP ##################################################################### */ 
+  BLEDevice::init(DEVICE_NAME);
+  BLEServer* pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new ServerCallbacks());
+  
+  BLEService* pService = pServer->createService(SERVICE_UUID);
+  
+  pTempChar = pService->createCharacteristic(
+    CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+  );
+  pTempChar->addDescriptor(new BLE2902());
+  
+  pCO2Char = pService->createCharacteristic(
+    CO2_CHAR_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+  );
+  pCO2Char->addDescriptor(new BLE2902());
+  
+  pHumidChar = pService->createCharacteristic(
+    HUMIDITY_CHAR_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+  );
+  pHumidChar->addDescriptor(new BLE2902());
+  
+  pTVOCChar = pService->createCharacteristic(
+    TVOC_CHAR_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+  );
+  pTVOCChar->addDescriptor(new BLE2902());
+  
+  pService->start();
+  pServer->getAdvertising()->start();
 
   /* ##################################################### COMPONENT SETUP ############################################################# */
   // LCD SETUP
@@ -258,6 +391,9 @@ void setup() {
   LCD.print("CCS811:Started");
   delay(2500);
   LCD.clear(); // Clear Initalize Messages
+
+  //// Dust Sensor Setup
+  digitalWrite(DUST_LED_PIN, HIGH); // Turn off led light that detects particles initially
 
   /*  ################################################ FREERTOS TASK CREATION ######################################################### */
   xTaskCreate(
