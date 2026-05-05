@@ -25,6 +25,12 @@ CCS811 CCS811OBJ(CCS811_ADDR);
 
 ////////////////////////////////////////////////////////// DEFINE PINS /////////////////////////////////////////////////////////
 #define ButtonPin 0 // Built-In ESP32 Button Pin: D0
+#define BUZZER_PIN 32  // Pin for buzzer
+
+//// Wifi Credentials to Connect to Hotspot Webserver
+const char* wifiNetworkName = "SSID";
+const char* wifiPassword = "PASSWORD";
+const char* computerAddress = "http://MY_PC_IP:5000/data"; 
 
 
 BME280 BME280OBJ;
@@ -59,14 +65,16 @@ QueueHandle_t BLEQueue = xQueueCreate(5, sizeof(Data)); // This queue is for dat
 //// This is the signal/flag telling other tasks whether WIFI/BLE is ON(True) OR OFF(False)
 bool WirelessToggleState = false; 
 
-void TaskBuzzer(void *pvParameters)
-{
-  while(true)
-  {
-    // Add Alarm/Buzzer Calls Here When Dust/Env is in dangerous levels
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-  }
+// Helper Function for Buzzer Alert
+void makeBuzzerBeep(int freq, int duration) {
+  tone(BUZZER_PIN, freq);
+  delay(duration);
+  noTone(BUZZER_PIN);
 }
+void turnBuzzerOn(int freq) { tone(BUZZER_PIN, freq); }
+void turnBuzzerOff()        { noTone(BUZZER_PIN); }
+
+
 
 void TaskEnv (void *pvParameters) 
 {
@@ -81,6 +89,8 @@ void TaskEnv (void *pvParameters)
       dataSend.tempF = BME280OBJ.readTempF(); // Get temperature value from BME280 sensor in farenheit
       dataSend.pressure = BME280OBJ.readFloatPressure(); // Get pressure value from BME280 sensor
       dataSend.humidity = BME280OBJ.readFloatHumidity(); // Get humidity value from BME280 sensor
+      dataSend.MSG_TYPE = MSG_ENV; // Set message type to env data
+
       Serial.println(dataSend.CO2);
       Serial.println(dataSend.TVOC);
       Serial.println(dataSend.tempF);
@@ -97,6 +107,8 @@ void TaskEnv (void *pvParameters)
   }
 }
 
+// Source: https://www.waveshare.com/wiki/Dust_Sensor
+// This source gave us the pinout and code smaples needed to read from the dust/particle sensor
 void TaskDust(void *pvParameters)
 {
   while(true)
@@ -112,8 +124,27 @@ void TaskController (void *pvParameters)
     Data recievedData;
     // wait to receive data from different sensors in Controller Task
     if(xQueueReceive(ControllerQueue, &recievedData, portMAX_DELAY)) {
-      // After received sensor data change states based on data
       
+      // Check thresholds and use buzzer based on if above thresholds
+      if(recievedData.CO2 > 1000 || recievedData.TVOC > 500) 
+      {
+        turnBuzzerOn(2000);  // direct function call
+      } 
+      else
+      {
+        turnBuzzerOff();
+      }
+
+      // if wifi/ble button is toggled on than send data to BLE Task
+      if(WirelessToggleState == true) 
+      {
+        recievedData.MSG_TYPE = MSG_BLE;
+        xQueueSend(BLEQueue, &recievedData, portMAX_DELAY);
+      }
+
+      // Route values to BLE and LCD
+      recievedData.MSG_TYPE = MSG_LCD;
+      xQueueSend(DisplayQueue, &recievedData, portMAX_DELAY);
       /// Then send to appropriate Queue for Viewing and Displaying the data(TaskLCD and TaskBLE)
     }    
   }
@@ -130,7 +161,17 @@ void TaskLCD (void *pvParameters)
       switch (recievedData.MSG_TYPE)
       {
         case MSG_LCD:
-          LCD.print("Data-LCD:"); // Print message values on LCD Screen
+          // Print message values on LCD Screen
+          LCD.print("CO2:"); 
+          LCD.print(recievedData.CO2);
+          LCD.print(" TV:"); 
+          LCD.print(recievedData.TVOC);
+          LCD.setCursor(0, 1); // set LCD cursor for next line
+          LCD.print("T:"); 
+          LCD.print((int)recievedData.tempF);
+          LCD.print("F H:"); 
+          LCD.print((int)recievedData.humidity);
+          LCD.print("%");
           break;
         case MSG_BLE:
           Serial.print("Data-BLE"); // Print message values to BLE
@@ -179,7 +220,8 @@ void setup() {
   Serial.begin(115200); // Serial Communication Intialization
   Wire.begin(); // I2C Communication Intialization
 
-  pinMode(ButtonPin, INPUT_PULLUP); 
+  pinMode(ButtonPin, INPUT_PULLUP); // setup button pin as input
+  pinMode(BUZZER_PIN, OUTPUT); // setup buzzer as output
 
   /* ##################################################### COMPONENT SETUP ############################################################# */
   // LCD SETUP
@@ -209,7 +251,6 @@ void setup() {
     LCD.print("BME280:Started");
   }
 
-  
   //// CCS811 SETUP
   CCS811OBJ.begin();
   delay(2500); // Give CCS811 Time to Startup/Boot
@@ -219,15 +260,6 @@ void setup() {
   LCD.clear(); // Clear Initalize Messages
 
   /*  ################################################ FREERTOS TASK CREATION ######################################################### */
-  xTaskCreate(
-    TaskBuzzer,
-    "Buzzer Task",
-    2048,
-    NULL,
-    2,
-    NULL
-  );
-
   xTaskCreate(
     TaskEnv,
     "Environment Sensor Task",
@@ -254,7 +286,6 @@ void setup() {
     3,
     NULL
   );
-  
   
   xTaskCreate(
     TaskLCD,
